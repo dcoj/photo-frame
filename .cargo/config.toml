@@ -2,7 +2,9 @@
 runner = "probe-rs run --chip=esp32s3 --always-print-stacktrace --no-location --catch-hardfault"
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "info"
+ESP_WIFI_SSID = "Robusta_IoT"
+ESP_WIFI_PASSWORD = "colby-buteo-anion-hunter-kit-loge3-egg-stabilize0"
 
 [build]
 rustflags = ["-C", "link-arg=-nostartfiles"]
