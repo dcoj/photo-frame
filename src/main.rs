@@ -93,7 +93,7 @@ async fn main(spawner: Spawner) {
     let spi = Spi::new(
         p.SPI2,
         Config::default()
-            .with_frequency(Rate::from_khz(100))
+            .with_frequency(Rate::from_khz(4000))
             .with_mode(Mode::_0),
     )
     .unwrap()
@@ -108,14 +108,6 @@ async fn main(spawner: Spawner) {
     let rst = Output::new(p.GPIO37, Level::High, OutputConfig::default());
     let busy = Input::new(p.GPIO40, InputConfig::default());
     let mut display = EPD7in3f::new(spi, dc, rst, busy);
-
-    info!("Init Screen");
-
-    let _ = display.init().await;
-    let _ = display.clear(draw::Color::Black).await;
-    info!("Screen cleared");
-
-    let _ = display.sleep().await;
 
     //
     // Setup Wifi
@@ -165,7 +157,6 @@ async fn main(spawner: Spawner) {
         // }
 
         // Put the display to sleep when done
-        Timer::after(Duration::from_secs(60)).await;
         info!("Writing Red!");
         led.write([RGB8::new(50, 0, 0)]).ok();
         let _ = display.init().await;

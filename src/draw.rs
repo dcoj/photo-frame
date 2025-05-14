@@ -164,17 +164,16 @@ impl<'d> EPD7in3f<'d> {
         info!("Refreshing Screen!");
 
         self.send_command(0x04).await?; // POWER_ON
-        info!("Powering Screen...");
+                                        // info!("Powering Screen...");
         self.read_busy_h().await;
 
         self.send_command(0x12).await?; // DISPLAY_REFRESH
         self.send_data(0x00).await?;
-        info!("Doing Refresh...");
+        // info!("Doing Refresh...");
         self.read_busy_h().await;
 
         self.send_command(0x02).await?; // POWER_OFF
         self.send_data(0x00).await?;
-        info!("...");
         self.read_busy_h().await;
         info!("Screen Refresh complete!");
 
