@@ -3,7 +3,7 @@
 mod draw;
 mod led;
 mod wifi;
-use defmt::{info, warn};
+use defmt::{error, info, warn};
 
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -13,6 +13,7 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 
+use esp_hal::psram;
 use esp_hal::{
     clock::CpuClock,
     dma::{DmaRxBuf, DmaTxBuf},
@@ -36,7 +37,7 @@ use esp_wifi::{
 
 use led::SmartLedsAdapter;
 use panic_rtt_target as _;
-use reqwless::client::HttpClient;
+use reqwless::{client::HttpClient, request::Method};
 use smart_leds::{SmartLedsWrite, RGB8};
 use wifi::{connection, net_task};
 extern crate alloc;
@@ -51,9 +52,20 @@ macro_rules! mk_static {
     }};
 }
 
+fn init_psram_heap(start: *mut u8, size: usize) {
+    unsafe {
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            start,
+            size,
+            esp_alloc::MemoryCapability::External.into(),
+        ));
+    }
+}
+
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
     // generator version: 0.3.1
+    info!("Embassy initialized!");
 
     rtt_target::rtt_init_defmt!();
 
@@ -62,21 +74,26 @@ async fn main(spawner: Spawner) {
 
     esp_alloc::heap_allocator!(size: 72 * 1024);
 
+    // Initialize PSRAM and add it to the heap
+    let (start, size) = psram::init_psram(peripherals.PSRAM, psram::PsramConfig::default());
+
+    init_psram_heap(start, size);
+
     let timer0 = SystemTimer::new(p.SYSTIMER);
     esp_hal_embassy::init(timer0.alarm0);
 
     info!("Embassy initialized!");
 
     // Turn on Test LED
-    let eled = Output::new(p.GPIO5, Level::High, OutputConfig::default());
+    let eled = Output::new(p.GPIO9, Level::High, OutputConfig::default());
     // spawner
-    //     .spawn(blinker(eled, Duration::from_millis(6000)))
+    //     .spawn(blinker(eled, Duration::from_millis(1000)))
     //     .ok();
 
     // Setup onBoard LED
     let rmt = Rmt::new(p.RMT, Rate::from_mhz(80)).unwrap();
     let rmt_buffer = smartLedBuffer!(1);
-    let mut led = SmartLedsAdapter::new(rmt.channel0, p.GPIO48, rmt_buffer);
+    let mut led = SmartLedsAdapter::new(rmt.channel0, p.GPIO8, rmt_buffer);
 
     // Make LED Blue
     led.write([RGB8::new(10, 10, 10)]).ok();
@@ -96,16 +113,16 @@ async fn main(spawner: Spawner) {
             .with_mode(Mode::_0),
     )
     .unwrap()
-    .with_sck(p.GPIO36)
-    .with_mosi(p.GPIO35)
-    .with_cs(p.GPIO39)
+    .with_sck(p.GPIO4)
+    .with_mosi(p.GPIO5)
+    .with_cs(p.GPIO7)
     .with_dma(dma_channel)
     .with_buffers(dma_rx_buf, dma_tx_buf)
     .into_async();
 
-    let dc = Output::new(p.GPIO38, Level::High, OutputConfig::default());
-    let rst = Output::new(p.GPIO37, Level::High, OutputConfig::default());
-    let busy = Input::new(p.GPIO40, InputConfig::default());
+    let dc = Output::new(p.GPIO11, Level::High, OutputConfig::default());
+    let rst = Output::new(p.GPIO10, Level::High, OutputConfig::default());
+    let busy = Input::new(p.GPIO6, InputConfig::default());
     let mut display = EPD7in3f::new(spi, dc, rst, busy);
 
     //
@@ -141,7 +158,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(net_task(runner)).ok();
 
     let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 4096];
+    // let mut tx_buffer = [0; 4096];
 
     loop {
         if stack.is_link_up() {
@@ -160,46 +177,46 @@ async fn main(spawner: Spawner) {
     }
 
     loop {
-        // let client_state = TcpClientState::<1, 1024, 1024>::new();
-        // let tcp_client = TcpClient::new(stack, &client_state);
-        // let dns_client = DnsSocket::new(stack);
+        let client_state = TcpClientState::<1, 1024, 1024>::new();
+        let tcp_client = TcpClient::new(stack, &client_state);
+        let dns_client = DnsSocket::new(stack);
 
-        // let mut http_client = HttpClient::new(&tcp_client, &dns_client);
+        let mut http_client = HttpClient::new(&tcp_client, &dns_client);
 
-        // info!("sending requests");
-        // let url = "http://192.168.68.75:8080/E-Paper_code/pic/output.epd";
+        info!("sending requests");
+        let url = "http://192.168.68.75:8080/E-Paper_code/pic/output.epd";
         // if let Err(e) = draw::display_epd_streaming(&mut display, &mut http_client, url).await {
         //     warn!("Failed to display EPD: {:?}", e);
         // }
 
-        // let mut request = match http_client.request(Method::GET, &url).await {
-        //     Ok(req) => req,
-        //     Err(e) => {
-        //         error!("Failed to make HTTP request: {:?}", e);
-        //         return; // handle the error
-        //     }
-        // };
+        let mut request = match http_client.request(Method::GET, &url).await {
+            Ok(req) => req,
+            Err(e) => {
+                error!("Failed to make HTTP request: {:?}", e);
+                return; // handle the error
+            }
+        };
 
-        // let response = match request.send(&mut rx_buffer).await {
-        //     Ok(resp) => resp,
-        //     Err(_e) => {
-        //         error!("Failed to send HTTP request");
-        //         return; // handle the error;
-        //     }
-        // };
+        let response = match request.send(&mut rx_buffer).await {
+            Ok(resp) => resp,
+            Err(_e) => {
+                error!("Failed to send HTTP request");
+                return; // handle the error;
+            }
+        };
 
-        // info!("Response body: {:?}", &response.content_length);
-        // Timer::after(Duration::from_secs(5)).await;
+        info!("Response body: {:?}", &response.content_length);
+        Timer::after(Duration::from_secs(5)).await;
 
-        // display.init().await;
+        display.init().await;
 
-        // let res = response.body().read_to_end().await.unwrap();
-        // // Display the EPD format image
-        // if let Err(e) = display.display_epd(res).await {
-        //     error!("Failed to display EPD: {:?}", e);
-        // } else {
-        //     info!("Display updated successfully");
-        // }
+        let res = response.body().read_to_end().await.unwrap();
+        // Display the EPD format image
+        if let Err(e) = display.display_epd(res).await {
+            error!("Failed to display EPD: {:?}", e);
+        } else {
+            info!("Display updated successfully");
+        }
 
         // Put the display to sleep when done
         info!("Writing Red!");

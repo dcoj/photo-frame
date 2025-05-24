@@ -433,7 +433,7 @@ pub async fn display_epd_streaming(
         let range_str = "bytes=0-12";
         let range_tuple = ("Range", range_str);
         let headers = [range_tuple];
-        let mut request = http_client
+        let request = http_client
             .request(Method::GET, url)
             .await
             .map_err(|_| Error::HttpError)?;
