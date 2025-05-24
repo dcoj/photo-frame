@@ -1,14 +1,8 @@
 use defmt::{info, println, Format};
-use embassy_net::dns::DnsSocket;
-use embassy_net::tcp::client::TcpClient;
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::master::SpiDmaBus;
 use esp_hal::Async;
-
-use reqwless::client::HttpClient;
-use reqwless::request::Method;
-use reqwless::request::RequestBuilder;
 
 // Display resolution
 const EPD_WIDTH: u32 = 800;
@@ -16,13 +10,8 @@ const EPD_HEIGHT: u32 = 480;
 pub(crate) const DISPLAY_BUFFER_SIZE: usize = (EPD_WIDTH * EPD_HEIGHT / 2) as usize;
 
 const EPD_HEADER_SIZE: usize = 13;
-const CHUNK_SIZE: usize = 32768;
-
-// Static buffers to move data off the stack
-static mut RX_BUFFER: [u8; 32768] = [0; 32768]; // 8KB for receiving HTTP data
-static mut DISPLAY_BUFFER: [u8; EPD_WIDTH as usize * EPD_HEIGHT as usize / 2] =
-    [0; EPD_WIDTH as usize * EPD_HEIGHT as usize / 2];
-static mut RANGE_BUFFER: [u8; 32] = [0; 32]; // For range header string
+// const CHUNK_SIZE: usize = 32768;
+static EPD_FILE_SIZE: usize = DISPLAY_BUFFER_SIZE + EPD_HEADER_SIZE;
 
 #[derive(Debug, Format)]
 pub enum Error {
@@ -30,12 +19,12 @@ pub enum Error {
     InvalidVersion,
     InvalidDimensions,
     BufferTooSmall,
-    InvalidHeader,
-    UnsupportedBitDepth,
-    InvalidFileSize,
-    HttpError,
-    BmpParsing,
-    WriteError,
+    // InvalidHeader,
+    // UnsupportedBitDepth,
+    // InvalidFileSize,
+    // HttpError,
+    // BmpParsing,
+    // WriteError,
     SpiError(esp_hal::spi::Error),
 }
 
@@ -71,19 +60,19 @@ impl Color {
 }
 
 /// Converts RGB values to the display's color index
-#[inline]
-fn rgb_to_color_index(r: u8, g: u8, b: u8) -> u8 {
-    match (r, g, b) {
-        (0, 0, 0) => 0x0,       // Black
-        (255, 255, 255) => 0x1, // White
-        (0, 255, 0) => 0x2,     // Green
-        (0, 0, 255) => 0x3,     // Blue
-        (255, 0, 0) => 0x4,     // Red
-        (255, 255, 0) => 0x5,   // Yellow
-        (255, 128, 0) => 0x6,   // Orange
-        _ => 0x1,               // Default to white for any other color
-    }
-}
+// #[inline]
+// fn rgb_to_color_index(r: u8, g: u8, b: u8) -> u8 {
+//     match (r, g, b) {
+//         (0, 0, 0) => 0x0,       // Black
+//         (255, 255, 255) => 0x1, // White
+//         (0, 255, 0) => 0x2,     // Green
+//         (0, 0, 255) => 0x3,     // Blue
+//         (255, 0, 0) => 0x4,     // Red
+//         (255, 255, 0) => 0x5,   // Yellow
+//         (255, 128, 0) => 0x6,   // Orange
+//         _ => 0x1,               // Default to white for any other color
+//     }
+// }
 
 pub struct EPD7in3f<'d> {
     spi: SpiDmaBus<'d, Async>,
@@ -91,8 +80,6 @@ pub struct EPD7in3f<'d> {
     dc: Output<'d>,
     rst: Output<'d>,
     busy: Input<'d>,
-    width: u32,
-    height: u32,
 }
 
 impl<'d> EPD7in3f<'d> {
@@ -109,8 +96,6 @@ impl<'d> EPD7in3f<'d> {
             dc,
             rst,
             busy,
-            width: EPD_WIDTH,
-            height: EPD_HEIGHT,
         }
     }
 
@@ -279,11 +264,8 @@ impl<'d> EPD7in3f<'d> {
         Ok(())
     }
 
-    pub async fn display(&mut self, buffer: &[u8]) -> Result<(), Error> {
-        println!("Got: {} Want: {}", buffer.len(), DISPLAY_BUFFER_SIZE);
-        if buffer.len() < DISPLAY_BUFFER_SIZE {
-            return Err(Error::BufferTooSmall);
-        }
+    async fn display(&mut self, buffer: &[u8]) -> Result<(), Error> {
+        println!("Printing: {} bytes", buffer.len());
         self.send_command(0x10).await?;
         self.send_data_slice(buffer).await?;
         self.turn_on_display().await?;
@@ -352,11 +334,20 @@ impl<'d> EPD7in3f<'d> {
     /// Reads our custom EPD format and displays it
     pub async fn display_epd(&mut self, data: &[u8]) -> Result<(), Error> {
         // Check minimum size for header (magic + version + dimensions)
+        // println!("{}", data[0..20]);
+        // println!("display: {=[u8]:x}", data[0..100]);
         if data.len() < 13 {
             return Err(Error::BufferTooSmall);
         }
 
+        println!("Got: {} Want: {}", data.len(), EPD_FILE_SIZE);
+        if data.len() < EPD_FILE_SIZE {
+            return Err(Error::BufferTooSmall);
+        }
+
         // Check magic number "EPD7"
+        println!("Got: {} Want: EPD7", data[0..4]);
+
         if &data[0..4] != b"EPD7" {
             return Err(Error::InvalidMagic);
         }
@@ -387,7 +378,7 @@ impl<'d> EPD7in3f<'d> {
         }
 
         // Send the data to display
-        self.display(display_data).await;
+        let _ = self.display(display_data).await;
 
         Ok(())
     }
@@ -418,129 +409,27 @@ impl<'d> EPD7in3f<'d> {
     }
 }
 
-pub async fn display_epd_streaming(
-    display: &mut EPD7in3f<'_>,
-    http_client: &mut HttpClient<'_, TcpClient<'_, 1, 1024, 1024>, DnsSocket<'_>>,
-    url: &str,
-) -> Result<(), Error> {
-    // SAFETY: We know we have exclusive access to these static buffers
-    let rx_buffer = unsafe { &mut RX_BUFFER };
-    // let display_buffer = unsafe { &mut DISPLAY_BUFFER };
-    let range_buffer = unsafe { &mut RANGE_BUFFER };
+// // Add this helper function
+// fn write_number(buffer: &mut [u8], mut num: usize, offset: usize) -> usize {
+//     let mut digits = [0u8; 20]; // Max length of usize
+//     let mut i = 0;
 
-    // First get the header
-    {
-        let range_str = "bytes=0-12";
-        let range_tuple = ("Range", range_str);
-        let headers = [range_tuple];
-        let mut request = http_client
-            .request(Method::GET, url)
-            .await
-            .map_err(|_| Error::HttpError)?;
-        let mut request = request.headers(&headers);
-        let response = request
-            .send(rx_buffer)
-            .await
-            .map_err(|_| Error::HttpError)?;
+//     if num == 0 {
+//         buffer[offset] = b'0';
+//         return 1;
+//     }
 
-        let header = response.body().body_buf;
+//     while num > 0 {
+//         digits[i] = (num % 10) as u8 + b'0';
+//         num /= 10;
+//         i += 1;
+//     }
 
-        // Verify header
-        if header.len() < 13 {
-            return Err(Error::BufferTooSmall);
-        }
-        if &header[0..4] != b"EPD7" {
-            return Err(Error::InvalidMagic);
-        }
-        info!("image valid!");
-
-        if header[4] != 1 {
-            return Err(Error::InvalidVersion);
-        }
-    }
-
-    display.send_command(0x10).await?; // Start data transmission
-
-    let mut bytes_read = 0;
-    // const CHUNK_SIZE: usize = 8192;
-    const CHUNK_SIZE: usize = 32768;
-    const TOTAL_SIZE: usize = EPD_WIDTH as usize * EPD_HEIGHT as usize / 2;
-
-    // Then in your main function:
-    while bytes_read < TOTAL_SIZE {
-        // Clear range buffer
-        range_buffer.fill(0);
-
-        // Create range string manually
-        let chunk_start = 13 + bytes_read; // 13 is header size
-        let chunk_end = chunk_start + CHUNK_SIZE.min(TOTAL_SIZE - bytes_read) - 1;
-
-        // Write "bytes="
-        range_buffer[0..6].copy_from_slice(b"bytes=");
-        let mut pos = 6;
-
-        // Write start number
-        pos += write_number(range_buffer, chunk_start, pos);
-
-        // Write "-"
-        range_buffer[pos] = b'-';
-        pos += 1;
-
-        // Write end number
-        pos += write_number(range_buffer, chunk_end, pos);
-
-        let range_str =
-            core::str::from_utf8(&range_buffer[..pos]).map_err(|_| Error::WriteError)?;
-
-        let chunk_data = {
-            let range_tuple = ("Range", range_str);
-            let headers = [range_tuple];
-
-            let mut request = http_client
-                .request(Method::GET, url)
-                .await
-                .map_err(|_| Error::HttpError)?;
-            let mut request = request.headers(&headers);
-            let response = request
-                .send(rx_buffer)
-                .await
-                .map_err(|_| Error::HttpError)?;
-
-            response.body().body_buf
-        };
-
-        display.send_data_slice(chunk_data).await?;
-        bytes_read += chunk_data.len();
-    }
-    info!("display on");
-
-    // Finish display update
-    display.turn_on_display().await?;
-
-    Ok(())
-}
-
-// Add this helper function
-fn write_number(buffer: &mut [u8], mut num: usize, offset: usize) -> usize {
-    let mut digits = [0u8; 20]; // Max length of usize
-    let mut i = 0;
-
-    if num == 0 {
-        buffer[offset] = b'0';
-        return 1;
-    }
-
-    while num > 0 {
-        digits[i] = (num % 10) as u8 + b'0';
-        num /= 10;
-        i += 1;
-    }
-
-    for j in 0..i {
-        buffer[offset + j] = digits[i - 1 - j];
-    }
-    i
-}
+//     for j in 0..i {
+//         buffer[offset + j] = digits[i - 1 - j];
+//     }
+//     i
+// }
 
 // pub async fn display_epd_streaming(
 //     display: &mut EPD7in3f<'_>,

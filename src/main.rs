@@ -1,25 +1,41 @@
 #![no_std]
 #![no_main]
+#![deny(
+    clippy::mem_forget,
+    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
+    holding buffers for the duration of a data transfer."
+)]
+#![feature(allocator_api)]
+
+use defmt::info;
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+
+extern crate alloc;
+use panic_rtt_target as _;
+
+// This creates a default app-descriptor required by the esp-idf bootloader.
+// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
+// esp_bootloader_esp_idf::esp_app_desc!();
+
 mod draw;
 mod led;
 mod wifi;
-use defmt::{info, warn};
+use alloc::vec::Vec;
 
-use embassy_executor::Spawner;
+use defmt::{error, println, warn};
 use embassy_net::{
     dns::DnsSocket,
     tcp::client::{TcpClient, TcpClientState},
     StackResources,
 };
-use embassy_time::{Duration, Timer};
-
 use esp_hal::{
     clock::CpuClock,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig},
+    psram::PsramConfig,
     rmt::Rmt,
-    rng::Rng,
     spi::{
         master::{Config, Spi},
         Mode,
@@ -28,19 +44,12 @@ use esp_hal::{
     timer::{systimer::SystemTimer, timg::TimerGroup},
 };
 
-use esp_wifi::{
-    init,
-    wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState},
-    EspWifiController,
-};
-
+use draw::EPD7in3f;
+use esp_wifi::{config::PowerSaveMode, init, EspWifiController};
 use led::SmartLedsAdapter;
-use panic_rtt_target as _;
-use reqwless::client::HttpClient;
+use reqwless::{client::HttpClient, request::Method};
 use smart_leds::{SmartLedsWrite, RGB8};
 use wifi::{connection, net_task};
-extern crate alloc;
-use draw::EPD7in3f;
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -53,22 +62,54 @@ macro_rules! mk_static {
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
-    // generator version: 0.3.1
-
     rtt_target::rtt_init_defmt!();
+    info!("Embassy Hello!");
 
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    static PSRAM_ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+    let psram_config = PsramConfig::default();
+
+    let config = esp_hal::Config::default()
+        .with_cpu_clock(CpuClock::max())
+        .with_psram(psram_config);
+
     let p = esp_hal::init(config);
+    esp_alloc::heap_allocator!(size: 100 * 1024);
 
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    let (start, size) = esp_hal::psram::psram_raw_parts(&p.PSRAM);
+    unsafe {
+        PSRAM_ALLOCATOR.add_region(esp_alloc::HeapRegion::new(
+            start,
+            size,
+            esp_alloc::MemoryCapability::External.into(),
+        ));
+    }
 
-    let timer0 = SystemTimer::new(p.SYSTIMER);
-    esp_hal_embassy::init(timer0.alarm0);
+    info!("Starting Wifi");
+    let timg0 = TimerGroup::new(p.TIMG0);
+    let mut rng = esp_hal::rng::Rng::new(p.RNG);
+
+    let esp_wifi_ctrl = &*mk_static!(
+        EspWifiController<'static>,
+        init(timg0.timer0, rng.clone(), p.RADIO_CLK).unwrap()
+    );
+
+    let (mut wifi_controller, interfaces) =
+        esp_wifi::wifi::new(&esp_wifi_ctrl, p.WIFI).expect("Failed to initialize WIFI controller");
+    let wifi_interface = interfaces.sta;
+    wifi_controller
+        .set_mode(esp_wifi::wifi::WifiMode::Sta)
+        .expect("Failed to set wifi mode");
+    wifi_controller
+        .set_power_saving(PowerSaveMode::Minimum)
+        .expect("Failed to set power mode");
+
+    let systimer = SystemTimer::new(p.SYSTIMER);
+    esp_hal_embassy::init(systimer.alarm0);
 
     info!("Embassy initialized!");
 
-    // Turn on Test LED
-    let eled = Output::new(p.GPIO5, Level::High, OutputConfig::default());
+    // Turn on a Test LED
+    // let eled = Output::new(p.GPIO5, Level::High, OutputConfig::default());
     // spawner
     //     .spawn(blinker(eled, Duration::from_millis(6000)))
     //     .ok();
@@ -79,7 +120,11 @@ async fn main(spawner: Spawner) {
     let mut led = SmartLedsAdapter::new(rmt.channel0, p.GPIO48, rmt_buffer);
 
     // Make LED Blue
-    led.write([RGB8::new(10, 10, 10)]).ok();
+    led.write([RGB8::new(0, 0, 0)]).ok();
+
+    let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+    // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+    println!("{}", stats);
 
     info!("Setting up Screen");
 
@@ -89,44 +134,25 @@ async fn main(spawner: Spawner) {
     let dma_rx_buf = DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
     let dma_tx_buf = DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
 
-    let spi = Spi::new(
-        p.SPI2,
-        Config::default()
-            .with_frequency(Rate::from_khz(4000))
-            .with_mode(Mode::_0),
-    )
-    .unwrap()
-    .with_sck(p.GPIO36)
-    .with_mosi(p.GPIO35)
-    .with_cs(p.GPIO39)
-    .with_dma(dma_channel)
-    .with_buffers(dma_rx_buf, dma_tx_buf)
-    .into_async();
+    let spi = Spi::new(p.SPI2, Config::default().with_mode(Mode::_0))
+        .unwrap()
+        .with_sck(p.GPIO12)
+        .with_mosi(p.GPIO11)
+        .with_cs(p.GPIO10)
+        .with_dma(dma_channel)
+        .with_buffers(dma_rx_buf, dma_tx_buf)
+        .into_async();
 
-    let dc = Output::new(p.GPIO38, Level::High, OutputConfig::default());
-    let rst = Output::new(p.GPIO37, Level::High, OutputConfig::default());
-    let busy = Input::new(p.GPIO40, InputConfig::default());
+    let dc = Output::new(p.GPIO14, Level::High, OutputConfig::default());
+    let rst = Output::new(p.GPIO13, Level::High, OutputConfig::default());
+    let busy = Input::new(p.GPIO9, InputConfig::default());
     let mut display = EPD7in3f::new(spi, dc, rst, busy);
 
     //
     // Setup Wifi
     //
-    info!("Starting Wifi");
-
-    let timg0 = TimerGroup::new(p.TIMG0);
-    let mut rng = Rng::new(p.RNG);
-
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        init(timg0.timer0, rng.clone(), p.RADIO_CLK).unwrap()
-    );
-
-    let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, p.WIFI).unwrap();
-
-    let wifi_interface = interfaces.sta;
 
     let config = embassy_net::Config::dhcpv4(Default::default());
-
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
     // Init network stack
@@ -137,11 +163,10 @@ async fn main(spawner: Spawner) {
         seed,
     );
 
-    spawner.spawn(connection(controller)).ok();
+    spawner.spawn(connection(wifi_controller)).ok();
     spawner.spawn(net_task(runner)).ok();
 
-    let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 4096];
+    info!("Waiting to start WiFi...");
 
     loop {
         if stack.is_link_up() {
@@ -159,98 +184,148 @@ async fn main(spawner: Spawner) {
         Timer::after(Duration::from_millis(500)).await;
     }
 
+    let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+    println!("{}", stats);
+
     loop {
-        // let client_state = TcpClientState::<1, 1024, 1024>::new();
-        // let tcp_client = TcpClient::new(stack, &client_state);
-        // let dns_client = DnsSocket::new(stack);
+        let client_state = TcpClientState::<1, 1024, 1024>::new();
+        let tcp_client = TcpClient::new(stack, &client_state);
+        let dns_client = DnsSocket::new(stack);
 
-        // let mut http_client = HttpClient::new(&tcp_client, &dns_client);
+        let mut http_client = HttpClient::new(&tcp_client, &dns_client);
 
-        // info!("sending requests");
-        // let url = "http://192.168.68.75:8080/E-Paper_code/pic/output.epd";
+        info!("sentting up requests");
+        let url = "http://192.168.68.66:3005/recent";
         // if let Err(e) = draw::display_epd_streaming(&mut display, &mut http_client, url).await {
         //     warn!("Failed to display EPD: {:?}", e);
         // }
 
-        // let mut request = match http_client.request(Method::GET, &url).await {
-        //     Ok(req) => req,
-        //     Err(e) => {
-        //         error!("Failed to make HTTP request: {:?}", e);
-        //         return; // handle the error
-        //     }
-        // };
+        let mut request = http_client.request(Method::GET, &url).await.unwrap();
 
-        // let response = match request.send(&mut rx_buffer).await {
-        //     Ok(resp) => resp,
-        //     Err(_e) => {
-        //         error!("Failed to send HTTP request");
-        //         return; // handle the error;
-        //     }
-        // };
+        let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+        // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+        println!("{}", stats);
+        let stats: esp_alloc::HeapStats = PSRAM_ALLOCATOR.stats();
+        // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+        println!("PSRAM: {}", stats);
 
-        // info!("Response body: {:?}", &response.content_length);
-        // Timer::after(Duration::from_secs(5)).await;
+        info!("init vector");
+        Timer::after(Duration::from_secs(2)).await;
 
-        // display.init().await;
+        let mut vec = Vec::with_capacity_in(200000, &PSRAM_ALLOCATOR); // This should work but it doesn't so we allocate a fixed size buffer instead
+        for _ in 0..vec.capacity() {
+            vec.push(0_u8);
+        }
+        info!("done vector");
+        Timer::after(Duration::from_secs(2)).await;
 
-        // let res = response.body().read_to_end().await.unwrap();
+        let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+        // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+        println!("{}", stats);
+        let stats: esp_alloc::HeapStats = PSRAM_ALLOCATOR.stats();
+        // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+        println!("PSRAM: {}", stats);
+
+        info!("send request");
+        Timer::after(Duration::from_secs(1)).await;
+
+        let response = match request.send(&mut vec).await {
+            Ok(file) => file,
+            Err(e) => {
+                info!("Failed to make request");
+                info!("Err: {}", e);
+                return;
+            }
+        };
+        info!("sent request");
+
+        let body = response.body().read_to_end().await.unwrap();
+        println!("Got body: {}", body.len());
+
+        let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
+        // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
+        println!("{}", stats);
+
+        Timer::after(Duration::from_secs(10)).await;
+        led.write([RGB8::new(0, 0, 10)]).ok();
+        let _ = display.init().await;
+
         // // Display the EPD format image
-        // if let Err(e) = display.display_epd(res).await {
-        //     error!("Failed to display EPD: {:?}", e);
-        // } else {
-        //     info!("Display updated successfully");
+        // println!("display sen: {=[u8]:x}", body[0..10]);
+
+        // for a in 0..body.len() / 1024 {
+        //     println!("{=[u8]:x}", body[(a + 1) * 1024..((a + 1) * 1024) + 1024]);
         // }
 
-        // Put the display to sleep when done
-        info!("Writing Red!");
-        led.write([RGB8::new(50, 0, 0)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::Red).await;
-        info!("Done Red!");
+        if let Err(e) = display.display_epd(body).await {
+            error!("Failed to display EPD: {:?}", e);
+        } else {
+            info!("Display updated successfully");
+        }
+        info!("Now Sleeping!");
         let _ = display.sleep().await;
-        info!("Sleeping!");
+        led.write([RGB8::new(0, 0, 0)]).ok();
 
-        led.write([RGB8::new(10, 0, 0)]).ok();
+        // Put the display to sleep for 1hr when done
+        Timer::after(Duration::from_secs(60 * 60)).await;
 
-        Timer::after(Duration::from_secs(60)).await;
-        info!("Writing Green!");
-        led.write([RGB8::new(0, 50, 0)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::Green).await;
-        let _ = display.sleep().await;
-        led.write([RGB8::new(0, 10, 0)]).ok();
+        // info!("Writing Red!");
+        // led.write([RGB8::new(50, 0, 0)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Red).await;
+        // info!("Done Red!");
+        // let _ = display.sleep().await;
+        // info!("Sleeping!");
 
-        Timer::after(Duration::from_secs(60)).await;
-        info!("Writing Blue!");
-        led.write([RGB8::new(0, 0, 50)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::Blue).await;
-        let _ = display.sleep().await;
-        led.write([RGB8::new(0, 0, 10)]).ok();
+        // led.write([RGB8::new(10, 0, 0)]).ok();
 
-        Timer::after(Duration::from_secs(60)).await;
-        info!("Writing Yellow!");
-        led.write([RGB8::new(0, 50, 50)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::Yellow).await;
-        let _ = display.sleep().await;
-        led.write([RGB8::new(0, 10, 10)]).ok();
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing Green!");
+        // led.write([RGB8::new(0, 50, 0)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Green).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(0, 10, 0)]).ok();
 
-        Timer::after(Duration::from_secs(60)).await;
-        info!("Writing Orange!");
-        led.write([RGB8::new(50, 0, 50)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::Orange).await;
-        let _ = display.sleep().await;
-        led.write([RGB8::new(10, 0, 10)]).ok();
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing Blue!");
+        // led.write([RGB8::new(0, 0, 50)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Blue).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(0, 0, 10)]).ok();
 
-        Timer::after(Duration::from_secs(60)).await;
-        info!("Writing White!");
-        led.write([RGB8::new(50, 50, 50)]).ok();
-        let _ = display.init().await;
-        let _ = display.clear(draw::Color::White).await;
-        let _ = display.sleep().await;
-        led.write([RGB8::new(10, 10, 10)]).ok();
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing Black!");
+        // led.write([RGB8::new(10, 10, 10)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Black).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(5, 5, 5)]).ok();
+
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing Yellow!");
+        // led.write([RGB8::new(0, 50, 50)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Yellow).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(0, 10, 10)]).ok();
+
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing Orange!");
+        // led.write([RGB8::new(50, 0, 50)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::Orange).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(10, 0, 10)]).ok();
+
+        // Timer::after(Duration::from_secs(60)).await;
+        // info!("Writing White!");
+        // led.write([RGB8::new(50, 50, 50)]).ok();
+        // let _ = display.init().await;
+        // let _ = display.clear(draw::Color::White).await;
+        // let _ = display.sleep().await;
+        // led.write([RGB8::new(10, 10, 10)]).ok();
     }
 }
 

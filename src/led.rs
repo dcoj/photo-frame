@@ -3,12 +3,11 @@
 // with small modification to allow compiling on esp32s3 with latest esp-hal beta.
 //
 use core::{fmt::Debug, slice::IterMut};
-
+use defmt::error;
 use esp_hal::{
     clock::Clocks,
     gpio::{interconnect::PeripheralOutput, Level},
-    peripheral::Peripheral,
-    rmt::{Error as RmtError, PulseCode, TxChannel, TxChannelConfig, TxChannelCreator},
+    rmt::{PulseCode, TxChannel, TxChannelConfig, TxChannelCreator},
 };
 use smart_leds_trait::{SmartLedsWrite, RGB8};
 
@@ -25,7 +24,7 @@ pub enum LedAdapterError {
     /// Raised in the event that the provided data container is not large enough
     BufferSizeExceeded,
     /// Raised if something goes wrong in the transmission,
-    TransmissionError(RmtError),
+    TransmissionError,
 }
 
 /// Macro to allocate a buffer sized for a specific number of LEDs to be
@@ -62,14 +61,13 @@ where
     TX: TxChannel,
 {
     /// Create a new adapter object that drives the pin using the RMT channel.
-    pub fn new<C, P>(
+    pub fn new<C>(
         channel: C,
-        pin: impl Peripheral<P = P> + 'd,
+        pin: impl PeripheralOutput<'d>,
         rmt_buffer: [u32; BUFFER_SIZE],
     ) -> SmartLedsAdapter<TX, BUFFER_SIZE>
     where
-        C: TxChannelCreator<'d, TX, P>,
-        P: PeripheralOutput + Peripheral<P = P>,
+        C: TxChannelCreator<'d, TX>,
     {
         let config = TxChannelConfig::default()
             .with_clk_divider(1)
@@ -169,7 +167,8 @@ where
             }
             Err((e, chan)) => {
                 self.channel = Some(chan);
-                Err(LedAdapterError::TransmissionError(e))
+                error!("Error while transmitting LED sequence: {}", e);
+                Err(LedAdapterError::TransmissionError)
             }
         }
     }

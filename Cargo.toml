@@ -6,32 +6,35 @@ version = "0.1.0"
 [[bin]]
 name = "photo-frame"
 path = "./src/main.rs"
+test = false
+doctest = false
+bench = false
 
 [dependencies]
-defmt = "0.3.10"
-embassy-net = { version = "0.6.0", features = [
-    "defmt",
-    "tcp",
-    "raw",
-    "dhcpv4",
-    "dns",
-    "proto-ipv4",
-    "proto-ipv6",
-] }
-embedded-io = "0.6.1"
-embedded-io-async = "0.6.1"
-esp-alloc = "0.7.0"
-esp-hal = { version = "1.0.0-beta.0", features = [
+
+defmt = "1.0.1"
+panic-rtt-target = { version = "0.2.0", features = ["defmt"] }
+rtt-target = { version = "0.6.1", features = ["defmt"] }
+
+esp-bootloader-esp-idf = "0.1.0"
+embedded-io = { version = "0.6.1", features = ["defmt-03"] }
+embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
+esp-hal = { version = "=1.0.0-beta.1", features = [
     "defmt",
     "esp32s3",
     "unstable",
+    "psram",
 ] }
-
-smart-leds = { version = "*" }
-smart-leds-trait = { version = "*" }
-panic-rtt-target = { version = "0.2.0", features = ["defmt"] }
-rtt-target = { version = "0.6.1", features = ["defmt"] }
+esp-wifi = { version = "0.14.1", features = [
+    "builtin-scheduler",
+    "defmt",
+    "esp-alloc",
+    "esp32s3",
+    "smoltcp",
+    "wifi",
+] }
 smoltcp = { version = "0.12.0", default-features = false, features = [
+    "defmt",
     "medium-ethernet",
     "multicast",
     "proto-dhcpv4",
@@ -43,30 +46,35 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
     "socket-tcp",
     "socket-udp",
 ] }
-# for more networking protocol support see https://crates.io/crates/edge-net
+
+esp-alloc = { version = "0.8.0", features = ["defmt", "nightly"] }
+static_cell = { version = "2.1.0", features = ["nightly"] }
 critical-section = "1.2.0"
+
+esp-hal-embassy = { version = "0.8.1", features = ["defmt", "esp32s3"] }
+embassy-net = { version = "0.7.0", features = [
+    "defmt",
+    "dhcpv4",
+    "medium-ethernet",
+    "tcp",
+    "udp",
+    "dns",
+] }
 embassy-executor = { version = "0.7.0", features = [
     "defmt",
     "task-arena-size-20480",
 ] }
-embassy-time = { version = "0.4.0", features = ["generic-queue-8"] }
-esp-hal-embassy = { version = "0.7.0", features = ["esp32s3"] }
-esp-wifi = { version = "0.13.0", features = [
-    "builtin-scheduler",
-    "defmt",
-    "esp-alloc",
-    "esp32s3",
-    "wifi",
-] }
+embassy-time = { version = "0.4.0", features = ["defmt"] }
 
-embassy-embedded-hal = { version = "0.3.0" }
+smart-leds = { version = "*" }
+smart-leds-trait = { version = "*" }
 
 reqwless = { version = "0.13.0", features = ["defmt"] }
 serde = { version = "1.0.203", default-features = false, features = ["derive"] }
 serde-json-core = "0.5.1"
 
-heapless = { version = "0.8.0", default-features = false }
-static_cell = { version = "2.1.0", features = ["nightly"] }
+[profile.dev.package.esp-wifi]
+opt-level = 3
 
 [profile.dev]
 # Rust debug is too slow.

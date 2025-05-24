@@ -1,13 +1,12 @@
 [target.xtensa-esp32s3-none-elf]
-runner = "probe-rs run --chip=esp32s3 --always-print-stacktrace --no-location --catch-hardfault"
+runner = "probe-rs run --chip=esp32s3 --preverify --always-print-stacktrace --no-location"
 
 [env]
 DEFMT_LOG = "info"
-ESP_WIFI_SSID = "Robusta_IoT"
-ESP_WIFI_PASSWORD = "colby-buteo-anion-hunter-kit-loge3-egg-stabilize0"
+ESP_HAL_CONFIG_PSRAM_MODE = "octal"
 
 [build]
-rustflags = ["-C", "link-arg=-nostartfiles"]
+rustflags = ["-C", "link-arg=-nostartfiles", "-Z", "stack-protector=all"]
 
 target = "xtensa-esp32s3-none-elf"
 

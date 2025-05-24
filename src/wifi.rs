@@ -1,19 +1,9 @@
-use core::fmt::Write;
 use defmt::info;
-use embassy_net::{
-    dns::DnsSocket,
-    tcp::client::{TcpClient, TcpClientState},
-    Runner, StackResources,
-};
+use embassy_net::Runner;
 use embassy_time::{Duration, Timer};
-
 use esp_wifi::wifi::{
     ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState,
 };
-
-use heapless::{String, Vec};
-use panic_rtt_target as _;
-use reqwless::client::HttpClient;
 
 const SSID: &str = env!("ESP_WIFI_SSID");
 const PASSWORD: &str = env!("ESP_WIFI_PASSWORD");
@@ -21,7 +11,7 @@ const PASSWORD: &str = env!("ESP_WIFI_PASSWORD");
 #[embassy_executor::task]
 pub async fn connection(mut controller: WifiController<'static>) {
     info!("start connection task");
-    // info!("Device capabilities: {:?}", controller.capabilities());
+    // info!("Device capabilities: {}", controller.capabilities());
     loop {
         match esp_wifi::wifi::wifi_state() {
             WifiState::StaConnected => {
@@ -41,14 +31,21 @@ pub async fn connection(mut controller: WifiController<'static>) {
             info!("Starting wifi");
             controller.start_async().await.unwrap();
             info!("Wifi started!");
+
+            info!("Scan");
+            let result = controller.scan_n_async(10).await.unwrap();
+            for ap in result {
+                info!("{:?}", ap);
+            }
         }
         info!("About to connect...");
 
         match controller.connect_async().await {
             Ok(_) => info!("Wifi connected!"),
             Err(e) => {
-                info!("Failed to connect to wifi $r");
-                Timer::after(Duration::from_millis(5000)).await
+                info!("Failed to connect to wifi");
+                info!("Err: {}", e);
+                Timer::after(Duration::from_millis(10000)).await
             }
         }
     }
