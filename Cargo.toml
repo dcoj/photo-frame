@@ -10,10 +10,13 @@ path = "./src/main.rs"
 [dependencies]
 defmt = "0.3.10"
 embassy-net = { version = "0.6.0", features = [
-    "dhcpv4",
-    "medium-ethernet",
+    "defmt",
     "tcp",
-    "udp",
+    "raw",
+    "dhcpv4",
+    "dns",
+    "proto-ipv4",
+    "proto-ipv6",
 ] }
 embedded-io = "0.6.1"
 embedded-io-async = "0.6.1"
@@ -55,6 +58,12 @@ esp-wifi = { version = "0.13.0", features = [
     "esp32s3",
     "wifi",
 ] }
+
+embassy-embedded-hal = { version = "0.3.0" }
+
+reqwless = { version = "0.13.0", features = ["defmt"] }
+serde = { version = "1.0.203", default-features = false, features = ["derive"] }
+serde-json-core = "0.5.1"
 
 heapless = { version = "0.8.0", default-features = false }
 static_cell = { version = "2.1.0", features = ["nightly"] }

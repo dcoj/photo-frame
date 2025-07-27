@@ -2,7 +2,7 @@
 runner = "probe-rs run --chip=esp32s3 --always-print-stacktrace --no-location --catch-hardfault"
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "info"
 
 [build]
 rustflags = ["-C", "link-arg=-nostartfiles"]
