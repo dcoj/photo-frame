@@ -1,3 +1,5 @@
+#![allow(clippy::all)]
+#![allow(dead_code)]
 use defmt::{info, println, Format};
 use embassy_time::{Duration, Timer};
 use esp_hal::gpio::{Input, Output};

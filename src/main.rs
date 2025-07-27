@@ -1,5 +1,9 @@
 #![no_std]
 #![no_main]
+#![allow(
+    clippy::manual_div_ceil,
+    reason = "Allowed as waiting on https://github.com/rust-lang/rust-clippy/pull/14666"
+)]
 #![deny(
     clippy::mem_forget,
     reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
@@ -90,11 +94,11 @@ async fn main(spawner: Spawner) {
 
     let esp_wifi_ctrl = &*mk_static!(
         EspWifiController<'static>,
-        init(timg0.timer0, rng.clone(), p.RADIO_CLK).unwrap()
+        init(timg0.timer0, rng, p.RADIO_CLK).unwrap()
     );
 
     let (mut wifi_controller, interfaces) =
-        esp_wifi::wifi::new(&esp_wifi_ctrl, p.WIFI).expect("Failed to initialize WIFI controller");
+        esp_wifi::wifi::new(esp_wifi_ctrl, p.WIFI).expect("Failed to initialize WIFI controller");
     let wifi_interface = interfaces.sta;
     wifi_controller
         .set_mode(esp_wifi::wifi::WifiMode::Sta)
@@ -200,7 +204,7 @@ async fn main(spawner: Spawner) {
         //     warn!("Failed to display EPD: {:?}", e);
         // }
 
-        let mut request = http_client.request(Method::GET, &url).await.unwrap();
+        let mut request = http_client.request(Method::GET, url).await.unwrap();
 
         let stats: esp_alloc::HeapStats = esp_alloc::HEAP.stats();
         // HeapStats implements the Display and defmt::Format traits, so you can pretty-print the heap stats.
@@ -212,10 +216,10 @@ async fn main(spawner: Spawner) {
         info!("init vector");
         Timer::after(Duration::from_secs(2)).await;
 
-        let mut vec = Vec::with_capacity_in(200000, &PSRAM_ALLOCATOR); // This should work but it doesn't so we allocate a fixed size buffer instead
-        for _ in 0..vec.capacity() {
-            vec.push(0_u8);
-        }
+        let mut vec = Vec::with_capacity_in(200000, &PSRAM_ALLOCATOR);
+        // It seems to be more reliable to pre-fill the external memory
+        vec.resize(vec.capacity(), 0_u8);
+
         info!("done vector");
         Timer::after(Duration::from_secs(2)).await;
 
