@@ -15,6 +15,9 @@ jobs:
   rust-checks:
     name: Rust Checks
     runs-on: ubuntu-latest
+    env:
+      ESP_WIFI_SSID: "NOT_SET"
+      ESP_WIFI_PASSWORD: "NOT_SET"
     strategy:
       fail-fast: false
       matrix:
