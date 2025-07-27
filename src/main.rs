@@ -6,10 +6,11 @@ mod wifi;
 use defmt::{info, warn};
 
 use embassy_executor::Spawner;
-// use embassy_net::{
-//     dns::DnsSocket,
-//     tcp::client::{TcpClient, TcpClientState},
-// };
+use embassy_net::{
+    dns::DnsSocket,
+    tcp::client::{TcpClient, TcpClientState},
+    StackResources,
+};
 use embassy_time::{Duration, Timer};
 
 use esp_hal::{
@@ -18,6 +19,7 @@ use esp_hal::{
     dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     rmt::Rmt,
+    rng::Rng,
     spi::{
         master::{Config, Spi},
         Mode,
@@ -26,31 +28,28 @@ use esp_hal::{
     timer::{systimer::SystemTimer, timg::TimerGroup},
 };
 
-// use esp_wifi::{
-//     init,
-//     wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState},
-//     EspWifiController,
-// };
+use esp_wifi::{
+    init,
+    wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState},
+    EspWifiController,
+};
 
 use led::SmartLedsAdapter;
 use panic_rtt_target as _;
 use reqwless::client::HttpClient;
 use smart_leds::{SmartLedsWrite, RGB8};
-// use wifi::connect_wifi;
+use wifi::{connection, net_task};
 extern crate alloc;
 use draw::EPD7in3f;
 
-// macro_rules! mk_static {
-//     ($t:ty,$val:expr) => {{
-//         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-//         #[deny(unused_attributes)]
-//         let x = STATIC_CELL.uninit().write(($val));
-//         x
-//     }};
-// }
-
-// const SSID: &str = env!("ESP_WIFI_SSID");
-// const PASSWORD: &str = env!("ESP_WIFI_PASSWORD");
+macro_rules! mk_static {
+    ($t:ty,$val:expr) => {{
+        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
+        #[deny(unused_attributes)]
+        let x = STATIC_CELL.uninit().write(($val));
+        x
+    }};
+}
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
@@ -112,7 +111,53 @@ async fn main(spawner: Spawner) {
     //
     // Setup Wifi
     //
-    info!("Starting loop");
+    info!("Starting Wifi");
+
+    let timg0 = TimerGroup::new(p.TIMG0);
+    let mut rng = Rng::new(p.RNG);
+
+    let esp_wifi_ctrl = &*mk_static!(
+        EspWifiController<'static>,
+        init(timg0.timer0, rng.clone(), p.RADIO_CLK).unwrap()
+    );
+
+    let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, p.WIFI).unwrap();
+
+    let wifi_interface = interfaces.sta;
+
+    let config = embassy_net::Config::dhcpv4(Default::default());
+
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+
+    // Init network stack
+    let (stack, runner) = embassy_net::new(
+        wifi_interface,
+        config,
+        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        seed,
+    );
+
+    spawner.spawn(connection(controller)).ok();
+    spawner.spawn(net_task(runner)).ok();
+
+    let mut rx_buffer = [0; 4096];
+    let mut tx_buffer = [0; 4096];
+
+    loop {
+        if stack.is_link_up() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    info!("Waiting to get IP address...");
+    loop {
+        if let Some(config) = stack.config_v4() {
+            info!("Got IP: {}", config.address);
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
 
     loop {
         // let client_state = TcpClientState::<1, 1024, 1024>::new();
@@ -212,7 +257,7 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn blinker(mut led: Output<'static>, interval: Duration) {
     loop {
-        // info!("Hello high!");
+        warn!("Hello high!");
 
         led.set_high();
         Timer::after(interval).await;

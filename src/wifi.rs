@@ -1,55 +1,60 @@
-// pub async fn connect_wifi(controller: &mut WifiController<'static>) -> Result<(), &'static str> {
-//     println!("Starting wifi connection...");
+use core::fmt::Write;
+use defmt::info;
+use embassy_net::{
+    dns::DnsSocket,
+    tcp::client::{TcpClient, TcpClientState},
+    Runner, StackResources,
+};
+use embassy_time::{Duration, Timer};
 
-//     controller.set_network(ssid, password).unwrap();
+use esp_wifi::wifi::{
+    ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent, WifiState,
+};
 
-//     println!("Waiting for connection...");
-//     loop {
-//         if let WifiState::Connected(_) = controller.get_status() {
-//             break;
-//         }
-//         Timer::after(Duration::from_millis(100)).await;
-//     }
+use heapless::{String, Vec};
+use panic_rtt_target as _;
+use reqwless::client::HttpClient;
 
-//     Ok(())
-// }
+const SSID: &str = env!("ESP_WIFI_SSID");
+const PASSWORD: &str = env!("ESP_WIFI_PASSWORD");
 
-// let timg0 = TimerGroup::new(peripherals.TIMG0);
-//     let mut rng = Rng::new(peripherals.RNG);
+#[embassy_executor::task]
+pub async fn connection(mut controller: WifiController<'static>) {
+    info!("start connection task");
+    // info!("Device capabilities: {:?}", controller.capabilities());
+    loop {
+        match esp_wifi::wifi::wifi_state() {
+            WifiState::StaConnected => {
+                // wait until we're no longer connected
+                controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                Timer::after(Duration::from_millis(5000)).await
+            }
+            _ => {}
+        }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let client_config = Configuration::Client(ClientConfiguration {
+                ssid: SSID.into(),
+                password: PASSWORD.into(),
+                ..Default::default()
+            });
+            controller.set_configuration(&client_config).unwrap();
+            info!("Starting wifi");
+            controller.start_async().await.unwrap();
+            info!("Wifi started!");
+        }
+        info!("About to connect...");
 
-//     let esp_wifi_ctrl = &*mk_static!(
-//         EspWifiController<'static>,
-//         init(timg0.timer0, rng.clone(), peripherals.RADIO_CLK).unwrap()
-//     );
+        match controller.connect_async().await {
+            Ok(_) => info!("Wifi connected!"),
+            Err(e) => {
+                info!("Failed to connect to wifi $r");
+                Timer::after(Duration::from_millis(5000)).await
+            }
+        }
+    }
+}
 
-//     let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
-
-//     let wifi_interface = interfaces.sta;
-
-//     cfg_if::cfg_if! {
-//         if #[cfg(feature = "esp32")] {
-//             let timg1 = TimerGroup::new(peripherals.TIMG1);
-//             esp_hal_embassy::init(timg1.timer0);
-//         } else {
-//             use esp_hal::timer::systimer::SystemTimer;
-//             let systimer = SystemTimer::new(peripherals.SYSTIMER);
-//             esp_hal_embassy::init(systimer.alarm0);
-//         }
-//     }
-
-//     let config = embassy_net::Config::dhcpv4(Default::default());
-
-//     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-
-//     // Initialize WiFi
-//     let mut wifi = initialize(EspWifiInitFor::Wifi).unwrap();
-//     let mut controller = wifi.start().unwrap();
-
-//     // Connect to WiFi
-//     match connect_wifi(&mut controller).await {
-//         Ok(_) => info!("WiFi connected!"),
-//         Err(e) => {
-//             warn!("Failed to connect to WiFi: {:?}", e);
-//             return;
-//         }
-//     }
+#[embassy_executor::task]
+pub async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    runner.run().await
+}
